@@ -145,6 +145,8 @@ contract Poda {
         );
 
         commitmentList.push(commitment);
+        // either one address sends commitments, or hash(address, commitment)
+        // otherwise this mapping can fail if transactions for same commitment arrive out of order
         commitments[commitment] = Commitment({
             size: size,
             timestamp: uint32(block.timestamp),
@@ -169,6 +171,10 @@ contract Poda {
         for (uint256 i = 0; i < chunkIds.length;) {
             uint16 chunkId = chunkIds[i];
             require(chunkId < comm.totalChunks, "Invalid chunk ID");
+
+            // there is no "first" to own a chunk id
+            // chunk id ownership must be precommitted by the "dispenser"
+            // or in some way verified against the merkle tree root (verify merkle proof here)
             require(chunkOwners[commitment][chunkId] == address(0), "Chunk already attested");
             
             // Record chunk ownership
@@ -178,6 +184,7 @@ contract Poda {
             // Update bit-packed availability
             uint256 wordIndex = chunkId / 256;
             uint256 bitIndex = chunkId % 256;
+            // weird?? why word index and bit index ???
             chunkAvailability[commitment][wordIndex] |= (1 << bitIndex);
             
             // Add to available chunk list if it's a new chunk
@@ -194,6 +201,10 @@ contract Poda {
         
         // Check if commitment is now recoverable
         if (comm.availableChunks >= comm.requiredChunks) {
+            // this may be emitted by different parties.
+            // this is okay, but needs to be handled carefully by the clients.
+            // different full nodes may report different accounts having emitted
+            // as long as the client cares IF it is emitted but not WHO it is okay.
             emit CommitmentReady(commitment, comm.availableChunks);
         }
     }
@@ -248,6 +259,7 @@ contract Poda {
         require(providers[msg.sender].active, "Provider not registered or inactive");
         require(amount > 0, "Amount must be greater than 0");
         require(providers[msg.sender].stakedAmount >= amount, "Insufficient stake");
+        // this check here should be == 0, no? also this causes liveness attack (I can challenge you so that you cannot withdraw)
         require(providers[msg.sender].challengeCount > 0, "Provider has no active challenges");
         providers[msg.sender].stakedAmount -= amount;
         payable(msg.sender).transfer(amount);
@@ -322,6 +334,11 @@ contract Poda {
             challengeId: challengeId,
             challenger: msg.sender,
             // TODO: Check with pod team if this is feasible
+            // Answer: This is feasible but will return different timestamp on different validators.
+            // it's better to let the issuer of the challenge pass a deadline parameter,
+            // check that the deadline parameter is at least CHALLENGE_PERIOD seconds in the past
+            // (according to supermajority - use requireTimeBefore from pod-sdk/Time.sol)
+            // and then store the deadline in the struct here.
             issuedAt: uint32(block.timestamp)
         });
 
@@ -440,6 +457,7 @@ contract Poda {
         ChunkChallenge storage challenge = activeChunkChallenges[commitment][chunkId][msg.sender];
         require(challenge.challengeId != bytes32(0), "No active challenge");
         require(proof.length > 0, "Invalid proof");
+        // this will be different on each validator.
         require(activeChunkChallenges[commitment][chunkId][msg.sender].issuedAt + CHALLENGE_PERIOD > block.timestamp, "Challenge expired");
 
         if (verifyChunkProof(proof, commitment, chunkId, chunkData)) {
@@ -449,6 +467,7 @@ contract Poda {
             slashProviderChunk(challenge, commitment, chunkId, msg.sender);
         }
 
+        // deleting is very problematic in multiple ways. why delete?
         delete activeChunkChallenges[commitment][chunkId][msg.sender];
     }
     
@@ -481,6 +500,7 @@ contract Poda {
         // Update bit-packed availability
         uint256 wordIndex = chunkId / 256;
         uint256 bitIndex = chunkId % 256;
+        // this repeats the weird top-half bottom-half logic of chunk-id
         chunkAvailability[commitment][wordIndex] &= ~(1 << bitIndex);
         
         if (providers[provider].stakedAmount >= CHALLENGE_PENALTY) {
@@ -516,7 +536,8 @@ contract Poda {
         require(block.timestamp > challenge.issuedAt + CHALLENGE_PERIOD, "Challenge not expired yet");
         
         slashProviderChunk(challenge, commitment, chunkId, provider);
-        
+
+        // avoid deleting. prefer soft-delete like .isDeleted = true or a list of deleted challenges
         delete activeChunkChallenges[commitment][chunkId][provider];
 
         payable(msg.sender).transfer(CHALLENGE_PENALTY / 10); // 10% bounty
